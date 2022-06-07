@@ -1,0 +1,550 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+# set random seed to make results replicable
+set.seed(42)
+# Install libraries
+install.packages('tidytext')
+install.packages('wordcloud')
+install.packages('tidyverse')
+
+# load libraries
+library(dplyr)
+library(stargazer)
+library(car)
+library(anytime)
+library(tm)
+library(tidytext)
+library(wordcloud)
+library(tidyverse)
+library("syuzhet")
+library(rpart)
+library(rpart.plot)
+library(caret)
+```
+
+
+```{r}
+# load data
+d <- read.csv("kickstarter_data_OSF_simplified.csv", stringsAsFactors = F)
+#load("kickstarter_data_OSF_simplified.Rda")  # alternative option to import the data
+```
+
+
+```{r}
+# explore data
+head(d, 3)
+View(d[1:10,])
+length(unique(d$country))  # check number of countries
+summary(d)
+sort(table(d$category), decreasing = T)  # check distribution of categories
+d$category <- d$category %>% 
+  str_to_title()
+
+category_group_tally<-d%>%
+  group_by(category)%>%
+  tally() 
+ 
+category_group_tally$category<-factor(category_group_tally$category, levels = category_group_tally$category[order(category_group_tally$n, decreasing = F)])
+levels(category_group_tally$category)## Different categories
+
+category_group_tally %>% 
+  ggplot(aes(x=category, y=n, fill= category))+
+  geom_col(show.legend = FALSE)+
+  coord_flip()# Categories Vs Quantity
+
+category_group_goal <- d%>%
+  group_by(category)%>%
+  summarize(median_goal=median(goal))
+
+category_group_goal$category<-factor(category_group_goal$category, levels = category_group_goal$category[order(category_group_goal$median_goal, decreasing = F)])
+category_group_goal %>% 
+  ggplot(aes(x=category, y=median_goal, fill= category))+
+  geom_col(show.legend = FALSE)+
+  coord_flip()# Categories Vs funding goal
+```
+
+
+```{r}
+# transform variables
+d <- d %>% rename(text = blurb)  # rename text column
+summary(d$WC)
+d$WC_mc <- as.numeric(scale(d$WC, scale = F))  # mean-center word count (WC)
+summary(d$WC_mc)  # check mean-centering
+d$campaign_success <- ifelse(d$state == "failed", 0, 1)
+d$usd_pledged_ln <- log(d$usd_pledged + 1)
+d$goal_ln <- log(d$goal + 1)
+d$backers_count_ln <- log(d$backers_count+1)
+d$start_year <- format(as.Date(anytime(d$unix_startdate), format="%d/%m/%Y"),"%Y")
+round(prop.table(table(d$campaign_success)), 3) # proportion of project success
+text_df<-d%>%
+  unnest_tokens(word, text)%>%
+  anti_join(stop_words)
+text_df%>% 
+  count(word, sort = TRUE)%>%
+  filter(n > 3000) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word)) +
+  geom_col() +
+  labs(y = NULL)## most frequents words
+
+## 58.5% OF projects managed to reach their target
+
+text_cloud<-text_df %>%
+  count(word) %>%
+  with(wordcloud(word,n, max.words = 100))
+
+
+d %>% 
+  filter(campaign_success==0) %>% 
+  unnest_tokens(word, text)%>%
+  anti_join(stop_words) %>% 
+  count(word) %>%
+  with(wordcloud(word,n, max.words = 100))
+```
+
+
+```{r}
+# sample data (optional)
+
+set.seed(100)
+sample<- sample.int(n = nrow(d), 600, replace = F)
+sample_600 <- d[sample, ]
+kickstarter_test <- d[-sample, ]
+prop.table(table(sample_600$campaign_success))
+
+#write.csv(sample_600, file='sample.csv')
+#write.csv(kickstarter_test, file = 'kickstarter_test.csv')
+
+
+round(prop.table(table(sample_600$campaign_success)),3)
+round(prop.table(table(d$campaign_success)),3)
+```
+
+
+```{r}
+# create additional text-based variables
+d$i <- grepl("\\bi\\b|\\bme\\b|\\bmyself\\b|\\bmy\\b", tolower(d$text))  # helpful resource for regex: https://cran.r-project.org/web/packages/stringr/vignettes/regular-expressions.html
+round(prop.table(table(d$i)), 3)  # explore new variable
+d %>% group_by(i) %>% summarize(usd_pledged_median = median(usd_pledged))  # explore model-free evidence
+d %>% 
+  filter(i == T) %>% select(text) %>% sample_n(5)
+d$i<-ifelse(d$i=="FALSE",0,1)
+
+d1 <- d %>% 
+  filter(i ==campaign_success)
+
+accuracy_cust<- nrow(d1)/nrow(d)
+accuracy_cust
+
+## The use of personal pronouns is used 14% of the time..The median amount pledged when using personal pronouns is 242, 8.5 times less than that when not using personal pronouns
+## The custom lexicon accuracy is 39%
+```
+
+
+```{r}
+selected_examples <- d$text  # select examples
+
+# extract sentiment
+sentiment_score <- get_sentiment(selected_examples, 
+                                 method = "afinn")
+d$affin <- data.frame(example_sentence = selected_examples, sentiment_score, 
+                          polarity = ifelse(sentiment_score > 0, 1, 0))  # assign sentiment to sentences
+
+View(d$affin)
+d2 <- d %>% 
+  filter(affin$polarity==campaign_success)
+
+accuracy_affin<- nrow(d2)/nrow(d)
+accuracy_affin
+
+## The affin lexicon accuracy is 50%
+```
+
+
+```{r}
+# visualize data
+plot(table(d$start_year), main = "Number of Projects over Time")  # plot distribution of years
+par(mfrow = c(1,2))
+hist(d$usd_pledged_ln, main = "Amount Pledged (in USD, ln)")
+hist(d$goal_ln, main = "Funding Goal (in USD, ln)")
+round(cor(d$usd_pledged_ln, d$goal_ln), 3)  # check correlation
+hist(d$WC, main = "Word Count")
+hist(d$WC_mc, main = "Word Count (mean-centered)")
+
+## The correlation between goal and the pledged amount is very weak (0.139)
+```
+
+
+```{r}
+# explore data
+sample_labelled <- read.csv("sample_labelled.csv", stringsAsFactors = F)
+head(sample_labelled)
+table(sample_labelled$Sentiment)
+
+# pre-process data
+corpus <- VCorpus(VectorSource(sample_labelled$text))
+corpus_clean <- tm_map(corpus, content_transformer(tolower))
+corpus_clean <- tm_map(corpus_clean, removePunctuation)  # remove punctuation
+corpus_clean <- tm_map(corpus_clean, removeWords, stopwords('english')) # remove stopwords like 'and'
+corpus_clean <- tm_map(corpus_clean, removeWords, stopwords('english')[-which(stopwords('english') == "not")])  # remove stopwords like 'and', except for 'not'
+
+# print stopwords
+stopwords('english')  
+"and" %in% stopwords('english')  # check if a word occurs in the stopwords
+
+# specify tokenization limits
+min_uni <- 3
+min_chars <- 2
+max_chars <- 30
+
+# tokenize, create document-term-matrix (dtm)
+UnigramTokenizer <- function(x) unlist(lapply(ngrams(words(x), 1), paste, collapse = " "), use.names = FALSE)
+dtm_unigram <- DocumentTermMatrix(corpus_clean, control = list(tokenize = UnigramTokenizer, 
+                                                               wordLengths=c(min_chars,max_chars), 
+                                                               bounds = list(global = c(min_uni,Inf))))
+dtm_unigram <- weightBin(dtm_unigram)
+colnames(dtm_unigram)
+
+# explore dtm
+dtm_unigram
+head(as.matrix(dtm_unigram)[,1:15])
+
+
+# add labels to dtm
+labeled_dtm <- as.data.frame(cbind(sample_labelled$Sentiment, as.data.frame(as.matrix(dtm_unigram))))
+str(labeled_dtm)
+labeled_dtm[,-1] <- apply(labeled_dtm[,-1], 2, function(x) as.numeric(as.character(x)))
+colnames(labeled_dtm)[1] <- "y"
+
+# split data
+partition <- .8
+set.seed(0); 
+trainIndex <- createDataPartition(labeled_dtm$y, p = partition, list = FALSE)
+#set.seed(100)
+#trainIndex<- sample.int(n = nrow(labeled_dtm), size = floor(partition*nrow(labeled_dtm)), replace = F)
+train <- labeled_dtm[trainIndex,]
+test <- labeled_dtm[-trainIndex,]
+nrow(train) + nrow(test) == nrow(labeled_dtm)
+
+
+# train decision tree (DT)
+colnames(train) <- make.names(colnames(train))
+colnames(test) <- make.names(colnames(test))
+model_dt <- rpart(y ~ ., data = train, cp = 0.00, method = "class")  # optional: Let's vary the complexity parameter (cp)
+model_dt
+
+# plot decision tree
+rpart.plot(model_dt, 
+           box.palette="Blues",
+           tweak = 1,
+           fallen.leaves = TRUE,
+           round = 0,
+           type=1)
+
+# predict on hold-out test data
+preds_dt <- predict(model_dt, newdata = test, type = "class")
+head(preds_dt)
+length(preds_dt)
+length(colnames(test))
+
+# evaluate accuracy
+round(mean(preds_dt == test$y), 2)
+# Accuracy DT evaluated a 50%
+```
+
+
+```{r}
+# Applying Code sentiment ML Advanced
+pre_process_data <- function(dataset){
+  
+  processed_dataset <- VCorpus(VectorSource(sample_labelled$text))
+  processed_dataset <- tm_map(processed_dataset, content_transformer(tolower))
+  processed_dataset <- tm_map(processed_dataset, removeNumbers)
+  processed_dataset <- tm_map(processed_dataset, removePunctuation)
+  processed_dataset <- tm_map(processed_dataset, stripWhitespace)
+  
+  min_uni <- 3; min_bi <- 7; min_chars <- 3
+  my_tokenizer <- function(x) unlist(lapply(NLP::ngrams(words(x), 1:2), paste, collapse = " "), use.names = FALSE)
+  dtm_uni_bigram <- DocumentTermMatrix(processed_dataset, control = list(tokenize = my_tokenizer, wordLengths=c(min_chars,20), bounds = list(global = c(min_uni,Inf))))
+  return(dtm_uni_bigram)
+  
+  #UnigramTokenizer <- function(x) unlist(lapply(ngrams(words(x), 1), paste, collapse = " "), use.names = FALSE)
+  #dtm_unigram <- DocumentTermMatrix(processed_dataset, control = list(tokenize = UnigramTokenizer, wordLengths=c(min_chars,20), bounds = list(global = c(min_uni,Inf))))
+  #dtm_unigram <- weightBin(dtm_unigram)
+  
+  #BigramTokenizer <- function(x) unlist(lapply(ngrams(words(x), 2), paste, collapse = " "), use.names = FALSE)
+  #dtm_bigram <- DocumentTermMatrix(processed_dataset, control = list(tokenize = BigramTokenizer, wordLengths=c(min_chars*2,20), bounds = list(global = c(min_bi,Inf))))
+ # dtm_bigram <- weightBin(dtm_bigram)
+  
+  
+  
+}
+
+corpus_clean_dtm <- pre_process_data(sample_labelled)
+corpus_clean<- as.data.frame(as.matrix(corpus_clean_dtm))
+
+
+str(corpus_clean)
+object.size(corpus_clean)
+head(corpus_clean[,800:873])  # explore bigrams (at the end of the dtm)
+View(head(corpus_clean, 20))
+which.max(colSums(corpus_clean))
+
+# Split labeled DTM into training set (80% of data) and hold-out test set (20% of data)
+
+partition <- .8
+
+labeled_dtm <- as.data.frame(cbind(sample_labelled$Sentiment, corpus_clean))
+labeled_dtm[,-1] <- apply(labeled_dtm[,-1], 2, function(x) as.numeric(as.character(x)))
+colnames(labeled_dtm)[1] <- "class_dv"
+
+set.seed(128); trainIndex <- createDataPartition(sample_labelled$Sentiment, p = partition, list = FALSE)
+train_labeled <- labeled_dtm[trainIndex,]
+test_labeled <- labeled_dtm[-trainIndex,]
+
+# Define trainControl functions
+
+cv_tune <- 5; rep_tune <- 1
+cv_final <- 10; rep_final <- 5
+
+ctrl_tune <- trainControl(method = "repeatedcv", number = cv_tune, repeats = rep_tune, selectionFunction = "best", 
+                          verboseIter = TRUE, savePredictions = "final", classProbs = FALSE)
+ctrl_final <- trainControl(method = "repeatedcv", number = cv_final, repeats = rep_final, selectionFunction = "best", 
+                           verboseIter = TRUE, savePredictions = "final", classProbs = FALSE)
+
+# Set parameter grids
+
+grid_knn <- expand.grid(k = c(1,15,30,45,65))
+grid_rf <- expand.grid(mtry = c(round(sqrt(ncol(train_labeled))/2),round(sqrt(ncol(train_labeled)))), 
+                       splitrule = "gini", min.node.size = 1)
+grid_svm <- expand.grid(C = c(0.01,0.1,1,10,100))
+
+# Create set of models and combine grids
+
+set_of_models <- c("knn", "ranger", "svmLinear")
+model_parameter_grids <- as.data.frame(matrix(nrow = length(set_of_models), ncol = 2))
+
+colnames(model_parameter_grids) <- c("model", "parameter_grid")
+model_parameter_grids$model = set_of_models
+model_parameter_grids$parameter_grid = list(grid_knn, grid_rf, grid_svm)
+model_parameter_grids
+
+df_train_results <- as.data.frame(matrix(nrow = length(set_of_models), ncol = 5))
+colnames(df_train_results) <- c("final_model", "model", "train_acc", "tuned_parameters", "runtime")
+
+# Initialize lists
+
+models = list()
+final_model_list = list()
+tuned_parameters = list()
+models_final = list()
+final_model_list_final = list()
+
+# Train models
+
+set.seed(128); system.time(
+  for(i in 1:length(set_of_models)) {
+    
+    method_train <- model_parameter_grids$model[i]
+    grid <- model_parameter_grids$parameter_grid[i]
+    grid <- grid[[1]]
+    
+    fitted <- caret::train(y = factor(train_labeled[,1]), x = train_labeled[,-1], method = method_train, metric = "Accuracy",
+                           tuneGrid = grid, trControl = ctrl_tune)
+    
+    final_model <- fitted
+    train_acc <- caret::confusionMatrix(fitted$pred$pred, fitted$pred$obs)
+    
+    final_model_list[[i]] <- final_model
+    models[[i]] <- fitted
+    tuned_parameters[[i]] <- fitted$bestTune
+    
+    df_train_results$train_acc[i] <- round(train_acc$overall[1],4)
+    
+    # Fit tuned model on full dataset
+    
+    fitted_final <- caret::train(y = factor(labeled_dtm[,1]), x = labeled_dtm[,-1], method = method_train, metric = "Accuracy",
+                                 tuneGrid = fitted$bestTune, trControl = ctrl_final)
+    
+    final_model_final <- fitted_final
+    repeated_acc <- caret::confusionMatrix(fitted_final$pred$pred, fitted_final$pred$obs)
+    
+    final_model_list_final[[i]] <- final_model_final
+    models_final[[i]] <- fitted_final
+    
+    df_train_results$repeated_acc[i] <- round(repeated_acc$overall[1],4)
+    
+    
+  }
+)
+
+# Save models and tuned parameters
+
+df_train_results$final_model <- final_model_list
+df_train_results$model <- models
+df_train_results$tuned_parameters <- tuned_parameters
+
+parameters <- data.frame(df_train_results$tuned_parameters[[1]]$k,
+                         df_train_results$tuned_parameters[[2]]$mtry,
+                         df_train_results$tuned_parameters[[3]]$C)
+colnames(parameters) <- c("kNN_k", "RF_mtry", "SVM_C")
+
+# Compute standard deviations and standard errors
+
+std <- function(x) sd(x)/sqrt(length(x))
+std_dev <- vector(mode="numeric", length=0)
+std_err <- vector(mode="numeric", length=0)
+
+for(l in 1:length(set_of_models)) {
+  
+  std_dev[l] <- sd(final_model_list_final[[l]]$resample$Accuracy)
+  std_err[l] <- std(final_model_list_final[[l]]$resample$Accuracy)
+  
+}
+
+# explore variance of accuracy for rf
+final_model_list_final[[2]]$resample$Accuracy
+
+df_train_results$std_dev <- round(std_dev,4); df_train_results$std_err <- round(std_err,4)
+
+# Predict on hold-out test set
+
+df_train_results$test_acc = NA
+predictions <- as.data.frame(matrix(nrow = nrow(test_labeled), ncol = length(final_model_list)))
+colnames(predictions) <- c("kNN", "RF", "SVM")
+head(predictions)
+
+for(j in 1:length(final_model_list)) {
+  
+  method_train <- model_parameter_grids$model[j]
+  
+  pred_i <- predict(final_model_list[[j]], test_labeled[, -1], type = "raw")
+  
+  test_acc <- caret::confusionMatrix(pred_i, as.factor(test_labeled[,1]))
+  df_train_results$test_acc[j] <- round(test_acc$overall[1],4)
+  predictions[, j] = pred_i 
+  
+}
+
+# Consolidate results
+
+results_cols <- c("test_acc", "std_dev", "std_err")
+results <- df_train_results[,results_cols]
+rownames(results) <- c("kNN", "RF", "SVM")
+
+# Print results
+
+results
+
+# Plot results
+
+ggplot(results, aes(x=rownames(results), y=test_acc)) + 
+  geom_bar(position=position_dodge(), stat="identity", fill = "#4285f4", size=.3) +
+  geom_errorbar(aes(ymin=test_acc-2*std_err, ymax=test_acc+2*std_err), size=.3,
+                width=.2, position=position_dodge(.9)) +
+  geom_text(aes(label = sprintf("%.2f", test_acc), y= test_acc),  vjust = -2)+
+  xlab("Method") +
+  ylab("Accuracy (%)") +
+  scale_y_continuous(limits = c(0,1)) +
+  ggtitle(paste0("Accuracy per Method, ", "N=", nrow(data))) +
+  theme_classic()
+#colnames(kickstarter_test)
+```
+
+
+```{r}
+# apply text classifier to full data, important: run "SentimentML_Script.R" before running this
+corpus2 <- VCorpus(VectorSource(kickstarter_test$text))
+dtm2 <- DocumentTermMatrix(corpus2, control = list(dictionary = Terms(corpus_clean_dtm), 
+                                                   weighting = function(x) weightBin(x)))  
+
+
+
+
+dtm2  # inspect document-term-matrix (number of columns should be identical to the document-term-matrix based on which the classifier is trained)
+#colnames(d)<- make.names(colnames(d))
+kickstarter_test$Sentiment<- predict(final_model_list[[1]], as.data.frame(as.matrix(dtm2)), type = "raw")  # create new column based on predictions from classifier
+table(kickstarter_test$Sentiment)  # important: this is a weak sentiment measure and just for illustration purposes
+d<-rbind(sample_labelled,kickstarter_test)
+
+#Inserting back the variable i from the custom lexicon
+d$i <- grepl("\\bi\\b|\\bme\\b|\\bmyself\\b|\\bmy\\b", tolower(d$text))
+
+#Pretrained models Roberta
+dr<-read.csv("df_roberta.csv", stringsAsFactors= F)
+drf<-cbind(d,dr$label)
+
+# Inserting back polarity from AFFIN
+selected_examples <- drf$text  # select examples
+
+# extract sentiment
+sentiment_score <- get_sentiment(selected_examples, 
+                                 method = "afinn")
+drf$affin <- data.frame(example_sentence = selected_examples, sentiment_score, 
+                      polarity = ifelse(sentiment_score > 0, 1, 0))
+
+# analyze data
+m <- list()
+m[[1]] <- glm(campaign_success ~ WC_mc + i + affin$polarity + Sentiment + dr$label+ goal_ln + date_difference + country + category, data = drf, family = "binomial")  # logistic regression (for binary data)
+m[[2]] <- lm(usd_pledged_ln ~ WC_mc+ i + affin$polarity + Sentiment + dr$label+ goal_ln + date_difference + country + category , data = drf)  # linear regression (for continuous data)
+m[[3]] <- update(m[[2]], "usd_pledged ~ .")  # change to non-ln transformed usd_pledged to compare model fit
+m[[4]] <- update(m[[2]], "backers_count_ln ~ .")
+m[[5]] <- glm(backers_count ~ WC_mc + i + affin$polarity + Sentiment + dr$label+ goal_ln + date_difference + country + category, data = drf, family = "poisson")  # poisson regression (for count data)
+summary(m[[1]])
+vif(m[[1]])  # check vif values
+
+# report results
+stargazer(m,
+          title = "Regression Results",
+          omit = c("country", "category"),
+          no.space = F,
+          initial.zero = F,
+          notes.align = "l",
+          notes = "",
+          star.cutoffs = c(.05, .01, .001),
+          add.lines=list(c('Country Fixed Effects', rep('Yes', length(m))),
+                         c('Category Fixed Effects', rep('Yes', length(m)))),
+          omit.stat = "aic",
+          type = "text")
+
+# plot curves in relevant value range
+par(mfrow = c(1,3))
+START = quantile(d$WC_mc, probs = .05, na.rm = T)  # define 90% value range for WC from START to END
+START
+END = quantile(d$WC_mc, probs = .95, na.rm = T)
+END
+
+# plot campaign success
+b1 = coef(m[[1]])["WC_mc"]
+c = coef(m[[1]])["(Intercept)"]
+curve(b1 * x + c, from = START, to = END, 
+      ylab="Campaign Success", xlab = "Word Count (mean-centered)")
+
+# plot usd pledged (ln)
+b1 = coef(m[[2]])["WC_mc"]
+c = coef(m[[2]])["(Intercept)"]
+curve(b1 * x + c, from = START, to = END, 
+      ylab="USD Pledged (ln)", xlab = "Word Count (mean-centered)")
+
+# plot backers count
+b1 = coef(m[[5]])["WC_mc"]
+c = coef(m[[5]])["(Intercept)"]
+curve(b1 * x + c, from = START, to = END, 
+      ylab="Backers Count", xlab = "Word Count (mean-centered)")
+
+# THE END
+
+
+```
+
+
