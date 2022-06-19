@@ -264,7 +264,6 @@ round(mean(preds_dt == test$y), 2)
 
 
 ```{r}
-# Applying Code sentiment ML Advanced
 pre_process_data <- function(dataset){
   
   processed_dataset <- VCorpus(VectorSource(sample_labelled$text))
@@ -463,7 +462,7 @@ ggplot(results, aes(x=rownames(results), y=test_acc)) +
 
 
 ```{r}
-# apply text classifier to full data, important: run "SentimentML_Script.R" before running this
+# apply text classifier to full data
 corpus2 <- VCorpus(VectorSource(kickstarter_test$text))
 dtm2 <- DocumentTermMatrix(corpus2, control = list(dictionary = Terms(corpus_clean_dtm), 
                                                    weighting = function(x) weightBin(x)))  
